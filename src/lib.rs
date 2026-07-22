@@ -78,13 +78,9 @@ unsafe fn resolve_original() {
         return;
     }
 
-    for (i, name) in EXPORT_NAMES.iter().enumerate() {
-        let mut c: Vec<u8> = name.bytes().collect();
-        c.push(0);
-        if let Some(func) = GetProcAddress(original, c.as_ptr()) {
-            store_ptr(i, func as usize);
-        }
-    }
+    // Fill every forwarding pointer from the genuine DLL (by name, and by ordinal
+    // for NONAME exports). Generated in build.rs alongside the ordinal-exact table.
+    resolve_exports(original);
 }
 
 /// Load every `*.asi` in `dir` and call its `InitializeASI` export.
