@@ -1,17 +1,17 @@
 # Oxide ASI Loader
 
-**`oxiloader`** — a minimal ASI proxy loader, in Rust.
+**`oxiloader`**: a minimal ASI proxy loader, in Rust.
 
 It impersonates one Windows system DLL, forwards every export to the genuine copy
 in `System32`, and loads every `*.asi` plugin next to it. That is the entire
-feature set — no config files, no embedded manifest, no hooks. Each build is
+feature set: no config files, no embedded manifest, no hooks. Each build is
 ~200 KB and links only against `kernel32`/`ntdll`.
 
 ## Why
 
 Focused on reliability and a minimal footprint. It ships **no embedded manifest**
 and statically links the CRT (**no VC++ redist dependency**), so it carries nothing
-that could stop it from mapping into a host process — everything it needs is in the
+that could stop it from mapping into a host process. Everything it needs is in the
 DLL itself.
 
 ## How it works
@@ -20,15 +20,15 @@ DLL itself.
   imports; Windows loads it and runs its `DllMain`.
 - **Target chosen at compile time.** A PE export table is fixed at link time, so
   each binary carries exactly one DLL's exports. A cargo feature selects both the
-  exports and the forward target — no runtime self-name detection.
+  exports and the forward target, with no runtime self-name detection.
 - **Signature-agnostic forwarding.** `build.rs` reads the target DLL's export list
   and emits one `#[naked]` `jmp qword ptr [ptr]` stub per export. At load, the real
   System32 DLL is resolved and each pointer is filled in, so we never hand-write
   hundreds of function signatures.
 - **Loader-lock safe.** The original DLL is resolved *synchronously* in `DllMain`,
-  so the game's imports are valid the instant it calls them. The `.asi` plugins —
-  which may run heavy code in their own `DllMain` — are loaded from a *fresh
-  thread*, off the loader lock.
+  so the game's imports are valid the instant it calls them. The `.asi` plugins,
+  which may run heavy code in their own `DllMain`, are loaded from a *fresh thread*,
+  off the loader lock.
 - **Plugin ABI:** the standard ASI convention. Each `.asi` may export
   `InitializeASI()`, which is called after it loads, so existing ASI plugins work
   unchanged.
@@ -59,16 +59,8 @@ or `dinput8`.
    (next to the game exe).
 2. Put your `.asi` mods in that same folder, or in a `plugins\` subfolder.
 
-Use the artifact whose name matches — a `version.dll` build only works when named
+Use the artifact whose name matches: a `version.dll` build only works when named
 `version.dll` (the export table is baked in at build time).
-
-## Scope / anticheat
-
-oxiloader is a clean, low-footprint loader for **single-player modding**: it only
-`LoadLibrary`s DLLs — no memory patching, no hooks, no remote threads. It does
-**not** attempt to hide from or defeat kernel-mode anticheat (EAC / BattlEye /
-Vanguard); loading unsigned DLLs into a protected multiplayer game is detectable
-regardless of vector, and evasion is deliberately out of scope.
 
 ## License
 
