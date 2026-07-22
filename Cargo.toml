@@ -1,0 +1,26 @@
+[package]
+name = "oxiloader"
+version = "0.1.0"
+edition = "2021"
+description = "Oxide ASI Loader — a minimal ASI proxy loader, in Rust"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib"]
+name = "oxiloader"
+
+# Exactly one of these must be selected at build time. It picks both the set of
+# exported functions and the System32 DLL those exports forward to.
+[features]
+version = []
+dsound = []
+dxgi = []
+winmm = []
+dinput8 = []
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
