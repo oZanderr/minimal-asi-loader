@@ -14,6 +14,14 @@
 //!   avoid the loader lock.
 
 #![allow(non_snake_case, dead_code, static_mut_refs)]
+// Deliberate FFI patterns: Win32 type names, a generated helper, a nul byte string,
+// and DllMain's OS-mandated signature (which cannot be marked `unsafe`).
+#![allow(
+    clippy::upper_case_acronyms,
+    clippy::missing_safety_doc,
+    clippy::manual_c_str_literals,
+    clippy::not_unsafe_ptr_arg_deref
+)]
 
 use core::ffi::c_void;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
@@ -63,7 +71,10 @@ unsafe fn resolve_original() {
 
     // An absolute path bypasses the DLL search order, guaranteeing the genuine system DLL.
     let original = LoadLibraryExW(path.as_ptr(), core::ptr::null_mut(), 0);
-    if original.is_null() {
+    // Bail if the loader handed back our own module (proxy base-name collision):
+    // resolving exports against ourselves would point every forwarding stub at
+    // itself, an infinite jmp loop on the first forwarded call.
+    if original.is_null() || original as usize == SELF_MODULE {
         return;
     }
 
@@ -111,12 +122,24 @@ fn load_asi_from(dir: &std::path::Path) {
 }
 
 unsafe extern "system" fn asi_thread(_param: *mut c_void) -> u32 {
-    let mut buffer = [0u16; 1024];
-    let n = GetModuleFileNameW(SELF_MODULE as HMODULE, buffer.as_mut_ptr(), buffer.len() as u32)
-        as usize;
-    if n == 0 {
-        return 0;
-    }
+    // Our own module path, growing the buffer if the path would truncate (on
+    // truncation GetModuleFileNameW returns the buffer length with no room for a
+    // null, so `n == buffer.len()` means "try bigger").
+    let mut buffer = vec![0u16; 1024];
+    let n = loop {
+        let n = GetModuleFileNameW(SELF_MODULE as HMODULE, buffer.as_mut_ptr(), buffer.len() as u32)
+            as usize;
+        if n == 0 {
+            return 0;
+        }
+        if n < buffer.len() {
+            break n;
+        }
+        if buffer.len() >= 1 << 16 {
+            return 0; // absurdly long path; give up rather than loop
+        }
+        buffer.resize(buffer.len() * 2, 0);
+    };
 
     let self_path = std::path::PathBuf::from(std::ffi::OsString::from_wide(&buffer[..n]));
     let dir = match self_path.parent() {
