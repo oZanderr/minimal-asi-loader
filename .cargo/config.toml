@@ -1,4 +1,4 @@
-# Statically link the MSVC CRT so the loader has no VCRUNTIME140 / VC++ redist
-# dependency — it must load on any machine, like the C++ loader does.
+# Statically link the MSVC CRT so the loader carries no VCRUNTIME140 / VC++ redist
+# dependency and loads on any machine.
 [build]
 rustflags = ["-C", "target-feature=+crt-static"]

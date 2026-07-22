@@ -6,9 +6,9 @@ Guidance for AI assistants (Claude Code) working in this repo.
 
 **Oxide ASI Loader** (crate/binary `oxiloader`) is a minimal ASI proxy loader for Windows games (x64). It
 impersonates a system DLL, forwards that DLL's exports to the real copy in
-`System32`, and loads `*.asi` plugins. It is a deliberately tiny alternative to
-`ThirteenAG/Ultimate-ASI-Loader` — no config, no manifest, no hooks. Keep it that
-way; feature creep is a regression here, not progress.
+`System32`, and loads `*.asi` plugins. It is deliberately small — no config, no
+manifest, no hooks. Keep it that way; feature creep is a regression here, not
+progress.
 
 ## Layout
 
@@ -48,10 +48,10 @@ cargo build --release --features version   # one variant
 ## Invariants — do not break these
 
 - **x64 only.**
-- **Never add an embedded manifest.** A `Microsoft.Windows.Common-Controls` SxS
-  dependency is exactly what breaks recent UAL builds (fails to map before
-  `DllMain`). No `/manifestdependency`, no `RT_MANIFEST` resource, nothing that
-  pulls in comctl32 v6.
+- **Never add an embedded manifest or manifest dependency.** An external assembly
+  dependency can stop the DLL from mapping in some host processes. No
+  `/manifestdependency`, no `RT_MANIFEST` resource — keep the binary
+  self-contained.
 - **Keep the static CRT** (`.cargo/config.toml`). The loader must load on a bare
   machine with no VC++ redist.
 - **One artifact = one proxy name.** The PE export table is fixed at link time; a
@@ -61,8 +61,8 @@ cargo build --release --features version   # one variant
   thread* — doing it in `DllMain` risks loader-lock deadlocks.
 - **Forwarding stubs are `#[unsafe(naked)]`** — their body must be a single
   `core::arch::naked_asm!`, nothing else.
-- **Plugin ABI is `InitializeASI()`** (`extern "system"`), matching UAL. Don't
-  rename or change its signature.
+- **Plugin ABI is `InitializeASI()`** (`extern "system"`) — the standard ASI
+  convention. Don't rename or change its signature.
 
 ## Adding a proxy name
 

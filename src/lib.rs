@@ -5,13 +5,13 @@
 //! is the whole job. No config, no manifest, no hooks.
 //!
 //! Design notes:
-//! - x64 only (matches modern games).
-//! - No embedded SxS manifest: a Common-Controls dependency is exactly what
-//!   broke recent Ultimate ASI Loader builds, so we ship none.
-//! - The original DLL is resolved synchronously in DllMain so the game's imports
-//!   are valid the instant it calls them; the `.asi` plugins (which may run heavy
-//!   code in their own DllMain) are loaded on a fresh thread to stay clear of the
-//!   loader lock.
+//! - x64 only.
+//! - No embedded manifest and no runtime dependencies beyond the OS, so the
+//!   binary maps cleanly across host processes.
+//! - The original DLL is resolved synchronously in `DllMain`, so the host's
+//!   imports are valid the instant they are called. Plugins, which may run
+//!   arbitrary code in their own `DllMain`, are loaded on a separate thread to
+//!   avoid the loader lock.
 
 #![allow(non_snake_case, dead_code, static_mut_refs)]
 
@@ -61,7 +61,7 @@ unsafe fn resolve_original() {
     path.extend(TARGET_DLL.encode_utf16());
     path.push(0);
 
-    // Absolute path: bypasses search order entirely, so we always get the real one.
+    // An absolute path bypasses the DLL search order, guaranteeing the genuine system DLL.
     let original = LoadLibraryExW(path.as_ptr(), core::ptr::null_mut(), 0);
     if original.is_null() {
         return;
@@ -124,7 +124,7 @@ unsafe extern "system" fn asi_thread(_param: *mut c_void) -> u32 {
         None => return 0,
     };
 
-    // Next to the DLL (the game folder), then an optional `plugins` subfolder.
+    // The directory containing this DLL, then an optional `plugins` subfolder.
     load_asi_from(&dir);
     load_asi_from(&dir.join("plugins"));
     0

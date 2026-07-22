@@ -7,15 +7,12 @@ in `System32`, and loads every `*.asi` plugin next to it. That is the entire
 feature set — no config files, no embedded manifest, no hooks. Each build is
 ~200 KB and links only against `kernel32`/`ntdll`.
 
-## Why another loader?
+## Why
 
-A lean alternative to [Ultimate ASI Loader](https://github.com/ThirteenAG/Ultimate-ASI-Loader).
-Recent UAL builds embed a `Microsoft.Windows.Common-Controls` v6 side-by-side
-manifest dependency (for their TaskDialog UI). In some game processes that
-dependency fails to resolve, and the DLL then fails to map **before `DllMain`
-runs** — no log, no plugins, game launches fine. oxiloader ships **no manifest**
-and statically links the CRT (**no VC++ redist dependency**), so it maps anywhere
-the old, lean UAL builds did.
+Focused on reliability and a minimal footprint. It ships **no embedded manifest**
+and statically links the CRT (**no VC++ redist dependency**), so it carries nothing
+that could stop it from mapping into a host process — everything it needs is in the
+DLL itself.
 
 ## How it works
 
@@ -32,8 +29,8 @@ the old, lean UAL builds did.
   so the game's imports are valid the instant it calls them. The `.asi` plugins —
   which may run heavy code in their own `DllMain` — are loaded from a *fresh
   thread*, off the loader lock.
-- **Plugin ABI:** identical to Ultimate ASI Loader. Each `.asi` may export
-  `InitializeASI()`, which is called after it loads, so existing ASI mods work
+- **Plugin ABI:** the standard ASI convention. Each `.asi` may export
+  `InitializeASI()`, which is called after it loads, so existing ASI plugins work
   unchanged.
 
 ## Supported proxy names
