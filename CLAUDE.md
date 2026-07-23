@@ -7,14 +7,16 @@ Guidance for AI assistants (Claude Code) working in this repo.
 **Oxide ASI Loader** (crate/binary `oxiloader`) is a minimal ASI proxy loader for Windows games (x64). It
 impersonates a system DLL, forwards that DLL's exports to the real copy in
 `System32`, and loads `*.asi` plugins. It is deliberately small — no config, no
-manifest, no hooks. Keep it that way; feature creep is a regression here, not
-progress.
+manifest, and no *game-API* hooks. The single exception is a one-shot
+entry-point trampoline over the **host EXE** used purely to time plugin loading
+(see **Timing** below); it is not a feature, it is what makes loading work on
+current Windows. Beyond that, feature creep is a regression here, not progress.
 
 ## Layout
 
 | Path | Purpose |
 | --- | --- |
-| `src/lib.rs` | `DllMain`, original-DLL resolution, the ASI-loading thread. ~150 lines, the whole runtime. |
+| `src/lib.rs` | `DllMain`, original-DLL resolution, the entry-point trampoline, and the ASI-loading. ~340 lines, the whole runtime. |
 | `build.rs` | Generates the per-name export-forwarding stubs. **Holds the export-name tables** for each proxy DLL. |
 | `Cargo.toml` | One cargo feature per proxy name; exactly one must be enabled per build. |
 | `build-all.ps1` | Builds all five variants, copies each to `dist\<name>.dll`. |
@@ -43,6 +45,13 @@ cargo build --release --features version   # one variant
      # call e.g. h.GetFileVersionInfoSizeW(...) -> nonzero proves forwarding
      # check the marker file -> proves ASI loading
      ```
+     Note: `WinDLL`/`LoadLibrary` exercises only the **dynamic-load path**
+     (`reserved == null`, spawned thread). To exercise the **entry-point
+     trampoline** — the static-import path that matters for real games — you need
+     a host EXE that *statically imports* the proxy (e.g. a tiny Rust bin with
+     `#[link(name = "version")]` calling a forwarded export), placed next to the
+     proxy DLL. If plugins load before that host's `main()` runs, the trampoline
+     works.
   3. Clean up `testasi.rs`, `dist/test.*`, and the marker afterward.
 
 ## Invariants — do not break these
@@ -57,10 +66,26 @@ cargo build --release --features version   # one variant
 - **One artifact = one proxy name.** The PE export table is fixed at link time; a
   build cannot be renamed across proxy names.
 - **Timing:** resolve the original DLL *synchronously in `DllMain`* (the game may
-  call a forwarded export immediately). Load `.asi` files *only from the spawned
-  thread* — doing it in `DllMain` risks loader-lock deadlocks.
-- **Forwarding stubs are `#[unsafe(naked)]`** — their body must be a single
-  `core::arch::naked_asm!`, nothing else.
+  call a forwarded export immediately). **Never load `.asi` files under the loader
+  lock** — they run arbitrary `DllMain` code. *How* we defer is chosen from
+  `DllMain`'s `reserved` argument, which tells us how we were loaded:
+    - Static import (`reserved != null`) — the host EXE's entry point has not run
+      yet. Plant a one-shot absolute-jump trampoline over its entry point and load
+      plugins from there: host thread, after process init, before any host code.
+      Deterministic, no race. This is the path real games take, and the one that
+      newer Windows 11 loader behavior (25H2 / KB5095093) broke for the old
+      "spawn a thread from `DllMain`" approach — an async thread with no ordering
+      guarantee that current Windows lets lose the race against host startup.
+    - Dynamic load (`reserved == null`, i.e. `LoadLibrary`) — the host is already
+      past its entry point, so trampolining is pointless; load from a spawned
+      thread, which is safe here.
+  A single interlocked latch keeps the plugin sweep to exactly once. If the
+  trampoline can't be planted (odd PE), the static path falls back to the thread.
+- **Forwarding stubs and the entry-point thunk are `#[unsafe(naked)]`** — their
+  body must be a single `core::arch::naked_asm!`, nothing else. The thunk is
+  entered via jump with a pristine entry-point stack; it preserves the volatile
+  registers and flags, calls the (synchronous) plugin load, then jumps to the
+  restored real entry — so the host proceeds as if untouched.
 - **Plugin ABI is `InitializeASI()`** (`extern "system"`) — the standard ASI
   convention. Don't rename or change its signature.
 
