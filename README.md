@@ -4,8 +4,10 @@
 
 It impersonates one Windows system DLL, forwards every export to the genuine copy
 in `System32`, and loads every `*.asi` plugin next to it. That is the entire
-feature set: no config files, no embedded manifest, no hooks. Each build is
-~200 KB and links only against `kernel32`/`ntdll`.
+feature set: no config files, no embedded manifest, and no *game-API* hooks. The
+one thing it does plant is a throwaway entry-point trampoline on the host EXE,
+used purely to time plugin loading (see [How it works](#how-it-works)). Each build
+is ~200 KB and links only against `kernel32`/`ntdll`.
 
 ## Why
 
@@ -26,9 +28,21 @@ DLL itself.
   System32 DLL is resolved and each pointer is filled in, so we never hand-write
   hundreds of function signatures.
 - **Loader-lock safe.** The original DLL is resolved *synchronously* in `DllMain`,
-  so the game's imports are valid the instant it calls them. The `.asi` plugins,
-  which may run heavy code in their own `DllMain`, are loaded from a *fresh thread*,
-  off the loader lock.
+  so the game's imports are valid the instant it calls them. The `.asi` plugins may
+  run heavy code in their own `DllMain`, so they are never loaded under the loader
+  lock. *How* the load is deferred depends on how the proxy was loaded:
+    - *Static import* (the real-game case). The host EXE's entry point hasn't run
+      yet, so the loader plants a one-shot absolute-jump trampoline over it. That
+      trampoline fires on the host's own thread, after process init but before any
+      host code, loads the plugins once, then jumps to the real entry point — so
+      the host proceeds as if untouched. Deterministic, with no startup race (which
+      is what current Windows 11 broke for the old "spawn a thread from `DllMain`"
+      approach).
+    - *Dynamic load* (`LoadLibrary`). Already past the entry point, so plugins load
+      from a *fresh thread*, off the loader lock.
+- **Deduplicated plugins.** A plugin present in both the loader's own folder and
+  `plugins\` is loaded once (the copy next to the loader wins), matched by file
+  name case-insensitively.
 - **Plugin ABI:** the standard ASI convention. Each `.asi` may export
   `InitializeASI()`, which is called after it loads, so existing ASI plugins work
   unchanged.

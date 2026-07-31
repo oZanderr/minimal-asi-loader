@@ -111,8 +111,10 @@ unsafe fn resolve_original() {
     resolve_exports(original);
 }
 
-/// Load every `*.asi` in `dir` and call its `InitializeASI` export.
-fn load_asi_from(dir: &std::path::Path) {
+/// Load every `*.asi` in `dir` and call its `InitializeASI` export. `seen` holds
+/// the lowercased file names already loaded; a name present in more than one
+/// swept directory is loaded only the first time it is encountered.
+fn load_asi_from(dir: &std::path::Path, seen: &mut std::collections::HashSet<std::ffi::OsString>) {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return,
@@ -124,6 +126,19 @@ fn load_asi_from(dir: &std::path::Path) {
             .map(|e| e.eq_ignore_ascii_case("asi"))
             .unwrap_or(false);
         if !is_asi {
+            continue;
+        }
+
+        // Skip a plugin whose file name we have already loaded from another
+        // directory. Windows keys loaded modules by base name, so a second
+        // LoadLibraryW would hand back the existing handle and we would just
+        // re-run its InitializeASI — a double-init of one module. Compare
+        // case-insensitively, matching the file system.
+        let name = match path.file_name() {
+            Some(n) => n.to_ascii_lowercase(),
+            None => continue,
+        };
+        if !seen.insert(name) {
             continue;
         }
 
@@ -178,8 +193,9 @@ fn load_all_asi() {
         None => return,
     };
 
-    load_asi_from(&dir);
-    load_asi_from(&dir.join("plugins"));
+    let mut seen = std::collections::HashSet::new();
+    load_asi_from(&dir, &mut seen);
+    load_asi_from(&dir.join("plugins"), &mut seen);
 }
 
 unsafe extern "system" fn asi_thread(_param: *mut c_void) -> u32 {
