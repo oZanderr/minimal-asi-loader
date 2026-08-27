@@ -153,6 +153,14 @@ fn load_asi_from(dir: &std::path::Path, seen: &mut std::collections::HashSet<std
             .chain(std::iter::once(0))
             .collect();
         unsafe {
+            // `seen` only covers this sweep. A second oxiloader in the same
+            // process — two proxy names dropped in one game folder — runs its own
+            // sweep with its own `seen`, and `LoadLibraryW` would hand back the
+            // module the first one already loaded, re-running its `InitializeASI`.
+            // Anything already mapped has been initialized by whoever mapped it.
+            if !GetModuleHandleW(wide.as_ptr()).is_null() {
+                continue;
+            }
             let module = LoadLibraryW(wide.as_ptr());
             if module.is_null() {
                 continue;

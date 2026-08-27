@@ -48,7 +48,9 @@ DLL itself.
       from a *fresh thread*, off the loader lock.
 - **Deduplicated plugins.** A plugin present in both the loader's own folder and
   `plugins\` is loaded once (the copy next to the loader wins), matched by file
-  name case-insensitively.
+  name case-insensitively. Anything already mapped into the process is skipped
+  outright, so dropping two oxiloader proxies in one folder doesn't run a
+  plugin's `InitializeASI` twice.
 - **Plugin ABI:** the standard ASI convention. Each `.asi` may export
   `InitializeASI()`, which is called after it loads, so existing ASI plugins work
   unchanged.
