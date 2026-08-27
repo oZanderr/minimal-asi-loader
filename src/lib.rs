@@ -14,15 +14,19 @@
 //!   under the loader lock. *How* we defer depends on how we were loaded, which
 //!   `DllMain`'s `reserved` argument tells us:
 //!     * Static import (`reserved != null`) — the host's entry point has not run
-//!       yet. We install a one-shot trampoline over the host's entry point and
-//!       load plugins from there: on the host's own thread, after the process is
-//!       fully initialized, before any host code runs. Deterministic ordering,
-//!       no race. This is the path real games take, and the one that newer
-//!       Windows 11 loader behavior (25H2 / KB5095093) broke for the old
-//!       spawn-a-thread-from-DllMain approach.
+//!       yet, so we arrange to be called back on the host's own thread once the
+//!       process is fully initialized, before any host code runs. Deterministic
+//!       ordering, no race. This is the path real games take, and the one that
+//!       newer Windows 11 loader behavior (25H2 / KB5095093) broke for the old
+//!       spawn-a-thread-from-DllMain approach. Two ways to arrange it, in order:
+//!         1. Repoint a few of the host's *import* slots at our thunks. That
+//!            write lands in the import table, which the loader itself fills in,
+//!            so a host that checksums its own code at startup sees nothing.
+//!         2. Failing that (no usable import descriptors), plant a one-shot
+//!            absolute-jump trampoline over the host's entry point.
 //!     * Dynamic load (`reserved == null`, i.e. `LoadLibrary`) — the process is
-//!       already past its entry point, so there is nothing to trampoline. We
-//!       load plugins from a spawned thread, which is safe here.
+//!       already past its entry point, so there is nothing to hook. We load
+//!       plugins from a spawned thread, which is safe here.
 
 #![allow(non_snake_case, dead_code, static_mut_refs)]
 // Deliberate FFI patterns: Win32 type names, a generated helper, a nul byte string,
@@ -48,6 +52,7 @@ type FARPROC = Option<unsafe extern "system" fn() -> isize>;
 
 const DLL_PROCESS_ATTACH: u32 = 1;
 const PAGE_EXECUTE_READWRITE: u32 = 0x40;
+const PAGE_READWRITE: u32 = 0x04;
 
 extern "system" {
     fn DisableThreadLibraryCalls(module: HMODULE) -> i32;
@@ -279,24 +284,43 @@ unsafe extern "system" fn entry_thunk() {
     )
 }
 
-/// Plant the trampoline over the host EXE's entry point. Returns false if the
-/// PE looks wrong or the patch can't be written, so the caller can fall back.
-unsafe fn install_entry_hook() -> bool {
+/// Locate and validate the host EXE's PE headers, yielding `(base, nt)`. `None`
+/// if the image is not a mapped x64 PE, so callers can fall back.
+unsafe fn host_nt_headers() -> Option<(*const u8, *const u8)> {
     let base = GetModuleHandleW(core::ptr::null()) as *const u8;
     if base.is_null() {
-        return false;
+        return None;
     }
-
     // IMAGE_DOS_HEADER.e_lfanew -> IMAGE_NT_HEADERS64.
     let e_lfanew = *(base.add(0x3C) as *const i32);
     if e_lfanew <= 0 {
-        return false;
+        return None;
     }
     let nt = base.add(e_lfanew as usize);
     // "PE\0\0" signature, then PE32+ optional-header magic.
     if *(nt as *const u32) != 0x0000_4550 || *(nt.add(24) as *const u16) != 0x20B {
-        return false;
+        return None;
     }
+    Some((base, nt))
+}
+
+/// RVA of data directory `i`, or 0 if the image declares fewer than `i + 1` of
+/// them. OptionalHeader is at `nt+24`: NumberOfRvaAndSizes at +108, the
+/// directories themselves at +112, eight bytes each (RVA then size).
+unsafe fn data_dir(nt: *const u8, i: usize) -> usize {
+    if *(nt.add(24 + 108) as *const u32) as usize <= i {
+        return 0;
+    }
+    *(nt.add(24 + 112 + 8 * i) as *const u32) as usize
+}
+
+/// Plant the trampoline over the host EXE's entry point. Returns false if the
+/// PE looks wrong or the patch can't be written, so the caller can fall back.
+unsafe fn install_entry_hook() -> bool {
+    let (base, nt) = match host_nt_headers() {
+        Some(v) => v,
+        None => return false,
+    };
     // OptionalHeader (nt+24) . AddressOfEntryPoint (+16).
     let entry_rva = *(nt.add(24 + 16) as *const u32) as usize;
     if entry_rva == 0 {
@@ -329,6 +353,301 @@ unsafe fn install_entry_hook() -> bool {
     true
 }
 
+// ---------------------------------------------------------------------------
+// Import-table trampoline
+//
+// Preferred over patching the entry point: the write lands in the host's import
+// table rather than its code, so a host that checksums its own `.text` at
+// startup — anti-tamper and packers routinely do — sees an untouched image. The
+// ordering guarantee is identical and just as structural: host import slots are
+// read only by host code, and host code does not run until the loader has
+// returned from process initialization and dropped its lock.
+// ---------------------------------------------------------------------------
+
+/// Imports called from `__security_init_cookie`, at the very top of the CRT
+/// entry point — before C initializers and before static constructors. Used
+/// when the host declares no TLS callbacks, so nothing can reach a patched slot
+/// while the loader lock is still held.
+const EARLY_CANDIDATES: &[&[u8]] = &[
+    b"GetSystemTimeAsFileTime",
+    b"QueryPerformanceCounter",
+    b"GetCurrentThreadId",
+    b"GetCurrentProcessId",
+    b"InitializeSListHead",
+    b"IsProcessorFeaturePresent",
+];
+
+/// The CRT's own startup plumbing, imported from `api-ms-win-crt-runtime-*` by
+/// any host that links the CRT dynamically. Every one of these is called
+/// unconditionally from `__scrt_common_main_seh` *before* it runs static
+/// constructors — `_initterm` is literally the function that runs them — so
+/// hooking one lands us ahead of the host's own initialization while the CRT is
+/// already up, which is a friendlier place for a plugin than the raw entry point.
+///
+/// Safe even when the host has TLS callbacks: at TLS-callback time the CRT has
+/// not been initialized, so calling any of these would be a bug, and protectors
+/// do not.
+///
+/// Curated for functions that are *always* called. `_seh_filter_exe` runs only on
+/// an exception, and `_register_onexit_function` / `__p___argc` / `__p___argv` are
+/// lazy or late; hooking a slot nothing calls is what produces a silent no-load.
+const UCRT_CANDIDATES: &[&[u8]] = &[
+    b"_initterm_e",
+    b"_initterm",
+    b"_configure_narrow_argv",
+    b"_configure_wide_argv",
+    b"_initialize_narrow_environment",
+    b"_initialize_wide_environment",
+    b"_set_app_type",
+    b"_initialize_onexit_table",
+];
+
+/// Last resort, for a host with TLS callbacks *and* a statically linked CRT, which
+/// leaves nothing from the list above to hook. Nothing but CRT startup calls
+/// these, so they are safe — but they run after the static constructors, so
+/// plugins arrive later than they otherwise would.
+const CRT_CANDIDATES: &[&[u8]] = &[
+    b"GetStartupInfoW",
+    b"GetStartupInfoA",
+    b"GetCommandLineW",
+    b"GetCommandLineA",
+    b"SetUnhandledExceptionFilter",
+];
+
+/// How many import slots to hook. More than one because a protector that
+/// rebuilds the IAT, or a candidate the host never actually calls, would
+/// otherwise leave us with no trigger at all.
+const IAT_SLOTS_MAX: usize = 4;
+
+/// (slot address, original value) per hooked slot; zeroed entries are unused.
+static mut IAT_SLOTS: [(usize, usize); IAT_SLOTS_MAX] = [(0, 0); IAT_SLOTS_MAX];
+
+/// Declares one naked thunk per hookable slot, each with its own tail-jump
+/// target. A thunk is entered by the host's `call qword ptr [slot]` with the
+/// caller's arguments live, so unlike the entry-point thunk it must also
+/// preserve the XMM argument registers — the plugin sweep is ordinary Rust and
+/// will clobber them.
+macro_rules! iat_thunks {
+    ($($real:ident => $thunk:ident),* $(,)?) => {
+        $(
+            static mut $real: usize = 0;
+
+            #[unsafe(naked)]
+            unsafe extern "system" fn $thunk() {
+                core::arch::naked_asm!(
+                    "push rax",
+                    "push rcx",
+                    "push rdx",
+                    "push r8",
+                    "push r9",
+                    "push r10",
+                    "push r11",
+                    "pushfq",
+                    // Entered by `call`, so rsp was 8 mod 16; the eight pushes above
+                    // leave it there, and 0x68 more lands it 16-aligned with 0x20 of
+                    // shadow space beneath the saved XMMs.
+                    "sub rsp, 0x68",
+                    "movaps xmmword ptr [rsp + 0x20], xmm0",
+                    "movaps xmmword ptr [rsp + 0x30], xmm1",
+                    "movaps xmmword ptr [rsp + 0x40], xmm2",
+                    "movaps xmmword ptr [rsp + 0x50], xmm3",
+                    "call {load}",
+                    "movaps xmm0, xmmword ptr [rsp + 0x20]",
+                    "movaps xmm1, xmmword ptr [rsp + 0x30]",
+                    "movaps xmm2, xmmword ptr [rsp + 0x40]",
+                    "movaps xmm3, xmmword ptr [rsp + 0x50]",
+                    "add rsp, 0x68",
+                    "popfq",
+                    "pop r11",
+                    "pop r10",
+                    "pop r9",
+                    "pop r8",
+                    "pop rdx",
+                    "pop rcx",
+                    "pop rax",
+                    // Tail jump: pushes no return address, so the host's own return
+                    // address and its shadow-stack entry stay matched.
+                    "jmp qword ptr [rip + {real}]",
+                    load = sym iat_load,
+                    real = sym $real,
+                )
+            }
+        )*
+
+        static IAT_THUNKS: [unsafe extern "system" fn(); IAT_SLOTS_MAX] = [$($thunk),*];
+
+        /// Point thunk `i` at the real function it must tail-jump to.
+        unsafe fn set_iat_real(i: usize, value: usize) {
+            let reals: [*mut usize; IAT_SLOTS_MAX] = [$(core::ptr::addr_of_mut!($real)),*];
+            *reals[i] = value;
+        }
+    };
+}
+
+iat_thunks! {
+    REAL_IAT_0 => iat_thunk_0,
+    REAL_IAT_1 => iat_thunk_1,
+    REAL_IAT_2 => iat_thunk_2,
+    REAL_IAT_3 => iat_thunk_3,
+}
+
+/// Compare a NUL-terminated ASCII string in the host image against `name`.
+/// Stops at the first mismatch or NUL, so it never reads past the string.
+unsafe fn cstr_eq(p: *const u8, name: &[u8]) -> bool {
+    let mut i = 0;
+    while i < name.len() {
+        let c = *p.add(i);
+        if c == 0 || c != name[i] {
+            return false;
+        }
+        i += 1;
+    }
+    *p.add(name.len()) == 0
+}
+
+/// True if the host declares at least one TLS callback. They run under the
+/// loader lock, before the entry point, which is what makes them dangerous to be
+/// called from.
+unsafe fn host_has_tls_callbacks(base: *const u8, tls_rva: usize) -> bool {
+    if tls_rva == 0 {
+        return false;
+    }
+    // IMAGE_TLS_DIRECTORY64.AddressOfCallBacks (+24) holds a virtual address;
+    // the image is already relocated, so it dereferences as-is.
+    let callbacks = *(base.add(tls_rva + 24) as *const usize);
+    callbacks != 0 && *(callbacks as *const usize) != 0
+}
+
+/// Point one import slot at thunk `i`, remembering what was there. The slot
+/// lives in the import table, which the loader itself writes, so this needs only
+/// `PAGE_READWRITE` — never `PAGE_EXECUTE_READWRITE`, which a host running under
+/// Arbitrary Code Guard would refuse.
+unsafe fn patch_iat_slot(slot: *mut usize, i: usize) -> bool {
+    let original = *slot;
+    if original == 0 {
+        return false;
+    }
+    // Record the tail-jump target before the slot goes live, so the thunk is
+    // never reachable without one.
+    set_iat_real(i, original);
+
+    let mut old = 0u32;
+    if VirtualProtect(slot as *mut c_void, 8, PAGE_READWRITE, &mut old) == 0 {
+        return false;
+    }
+    *slot = IAT_THUNKS[i] as usize;
+    let mut old2 = 0u32;
+    VirtualProtect(slot as *mut c_void, 8, old, &mut old2);
+
+    IAT_SLOTS[i] = (slot as usize, original);
+    true
+}
+
+/// Put every hooked import slot back. Idempotent.
+unsafe fn restore_iat_slots() {
+    // Copy the table out by value rather than borrowing the static.
+    for (slot, original) in IAT_SLOTS {
+        if slot == 0 {
+            continue;
+        }
+        let p = slot as *mut usize;
+        let mut old = 0u32;
+        if VirtualProtect(p as *mut c_void, 8, PAGE_READWRITE, &mut old) == 0 {
+            continue;
+        }
+        *p = original;
+        let mut old2 = 0u32;
+        VirtualProtect(p as *mut c_void, 8, old, &mut old2);
+    }
+}
+
+/// Called from an IAT thunk, on the host's own thread, after process init and
+/// before the host does anything of consequence. Unhook first, then sweep.
+unsafe extern "system" fn iat_load() {
+    restore_iat_slots();
+    load_all_asi();
+}
+
+/// Repoint a few of the host EXE's import slots at our thunks. Returns false if
+/// the PE has no usable import descriptors, so the caller can fall back to the
+/// entry-point trampoline.
+unsafe fn install_iat_hook() -> bool {
+    let (base, nt) = match host_nt_headers() {
+        Some(v) => v,
+        None => return false,
+    };
+    let import_rva = data_dir(nt, 1);
+    if import_rva == 0 {
+        return false;
+    }
+
+    // Earliest usable list wins. A TLS callback runs under the loader lock, ahead
+    // of the entry point, and a protector's callback plausibly calls the timing
+    // and id APIs in the early list — firing there would load plugins under that
+    // lock. So when the host declares callbacks the early list is off the table
+    // and we start at the CRT's own startup imports, which are still ahead of the
+    // host's static constructors.
+    let lists: &[&[&[u8]]] = if host_has_tls_callbacks(base, data_dir(nt, 9)) {
+        &[UCRT_CANDIDATES, CRT_CANDIDATES]
+    } else {
+        &[EARLY_CANDIDATES, UCRT_CANDIDATES, CRT_CANDIDATES]
+    };
+    for candidates in lists {
+        if hook_candidates(base, import_rva, candidates) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Walk the host's import descriptors and hook up to `IAT_SLOTS_MAX` slots whose
+/// function name appears in `candidates`. True if at least one was hooked.
+unsafe fn hook_candidates(base: *const u8, import_rva: usize, candidates: &[&[u8]]) -> bool {
+    let mut count = 0usize;
+    let mut desc = base.add(import_rva);
+    // IMAGE_IMPORT_DESCRIPTOR is 20 bytes: OriginalFirstThunk, TimeDateStamp,
+    // ForwarderChain, Name, FirstThunk. The array ends at an all-zero entry.
+    for _ in 0..4096 {
+        let oft = *(desc as *const u32) as usize;
+        let ft = *(desc.add(16) as *const u32) as usize;
+        if ft == 0 {
+            break;
+        }
+        // Match on function name only, ignoring which DLL supplies it: a host may
+        // import these from `kernel32.dll` or from an `api-ms-win-core-*` api-set
+        // and either is equally good to hook.
+        //
+        // Names live in the original thunk array, which the loader leaves alone;
+        // it overwrites only FirstThunk, which is the slot we want. Without an
+        // OriginalFirstThunk there are no names to match, so skip the descriptor.
+        if oft != 0 {
+            for j in 0..65536usize {
+                let thunk = *(base.add(oft + 8 * j) as *const u64);
+                if thunk == 0 {
+                    break;
+                }
+                // High bit set == imported by ordinal, so there is no name.
+                if thunk & 0x8000_0000_0000_0000 != 0 {
+                    continue;
+                }
+                // IMAGE_IMPORT_BY_NAME: a 2-byte hint, then the ASCII name.
+                let name = base.add((thunk as usize & 0x7FFF_FFFF) + 2);
+                if candidates.iter().any(|c| cstr_eq(name, c))
+                    && patch_iat_slot(base.add(ft + 8 * j) as *mut usize, count)
+                {
+                    count += 1;
+                    if count == IAT_SLOTS_MAX {
+                        return true;
+                    }
+                }
+            }
+        }
+        desc = desc.add(20);
+    }
+
+    count > 0
+}
+
 #[no_mangle]
 pub extern "system" fn DllMain(module: HMODULE, reason: u32, reserved: *mut c_void) -> i32 {
     if reason == DLL_PROCESS_ATTACH {
@@ -338,10 +657,11 @@ pub extern "system" fn DllMain(module: HMODULE, reason: u32, reserved: *mut c_vo
             resolve_original();
 
             // `reserved != null` == static import: the host entry point hasn't run
-            // yet, so trampoline it for a deterministic, race-free, main-thread load.
+            // yet, so hook it for a deterministic, race-free, main-thread load —
+            // through the import table if we can, over the entry point if not.
             // `reserved == null` == LoadLibrary: already past init, a thread is safe.
             if !reserved.is_null() {
-                if !install_entry_hook() {
+                if !install_iat_hook() && !install_entry_hook() {
                     spawn_asi_thread();
                 }
             } else {

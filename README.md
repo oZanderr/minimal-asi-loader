@@ -5,9 +5,11 @@
 It impersonates one Windows system DLL, forwards every export to the genuine copy
 in `System32`, and loads every `*.asi` plugin next to it. That is the entire
 feature set: no config files, no embedded manifest, and no *game-API* hooks. The
-one thing it does plant is a throwaway entry-point trampoline on the host EXE,
-used purely to time plugin loading (see [How it works](#how-it-works)). Each build
-is ~200 KB and links only against `kernel32`/`ntdll`.
+one thing it does plant is a throwaway, self-removing hook on the host EXE, used
+purely to time plugin loading (see [How it works](#how-it-works)). It goes in the
+host's import table, not its code, so a game that checksums itself at startup sees
+an untouched image. Each build is ~200 KB and links only against
+`kernel32`/`ntdll`.
 
 ## Why
 
@@ -32,12 +34,16 @@ DLL itself.
   run heavy code in their own `DllMain`, so they are never loaded under the loader
   lock. *How* the load is deferred depends on how the proxy was loaded:
     - *Static import* (the real-game case). The host EXE's entry point hasn't run
-      yet, so the loader plants a one-shot absolute-jump trampoline over it. That
-      trampoline fires on the host's own thread, after process init but before any
-      host code, loads the plugins once, then jumps to the real entry point — so
-      the host proceeds as if untouched. Deterministic, with no startup race (which
-      is what current Windows 11 broke for the old "spawn a thread from `DllMain`"
-      approach).
+      yet, so the loader arranges a one-shot callback on the host's own thread,
+      after process init but before any host code. It fires once, unhooks itself,
+      loads the plugins, and hands control back — so the host proceeds as if
+      untouched. Deterministic, with no startup race (which is what current
+      Windows 11 broke for the old "spawn a thread from `DllMain`" approach).
+      It gets there by repointing a few of the host's *import* slots at its own
+      thunks. Those live in the import table, which Windows itself writes while
+      loading the process, so a host that verifies its own code at startup — most
+      protected games do — finds nothing changed. Only if the host has no usable
+      import descriptors does it fall back to a trampoline over the entry point.
     - *Dynamic load* (`LoadLibrary`). Already past the entry point, so plugins load
       from a *fresh thread*, off the loader lock.
 - **Deduplicated plugins.** A plugin present in both the loader's own folder and
