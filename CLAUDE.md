@@ -4,7 +4,7 @@ Guidance for AI assistants (Claude Code) working in this repo.
 
 ## What this is
 
-**Oxide ASI Loader** (crate/binary `oxiloader`) is a minimal ASI proxy loader for Windows games (x64). It
+**Minimal ASI Loader** (crate `minimal-asi-loader`) is an ASI proxy loader for Windows games (x64). It
 impersonates a system DLL, forwards that DLL's exports to the real copy in
 `System32`, and loads `*.asi` plugins. It is deliberately small — no config, no
 manifest, and no *game-API* hooks. The single exception is a one-shot hook on the

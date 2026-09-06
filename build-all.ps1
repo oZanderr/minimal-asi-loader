@@ -7,7 +7,7 @@ New-Item -ItemType Directory -Force -Path dist | Out-Null
 foreach ($n in $names) {
     Write-Host "Building $n.dll ..."
     cargo build --release --features $n
-    Copy-Item "target\release\oxiloader.dll" "dist\$n.dll" -Force
+    Copy-Item "target\release\minimal_asi_loader.dll" "dist\$n.dll" -Force
 }
 Write-Host "`nDone. Artifacts in dist\:"
 Get-ChildItem dist\*.dll | Select-Object Name, @{N = "KB"; E = { [int]($_.Length / 1KB) } }

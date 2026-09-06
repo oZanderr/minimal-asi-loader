@@ -1,5 +1,5 @@
 [package]
-name = "oxiloader"
+name = "minimal-asi-loader"
 version = "0.3.0"
 edition = "2021"
 description = "A minimal ASI proxy loader, in Rust"
@@ -7,7 +7,7 @@ license = "MIT"
 
 [lib]
 crate-type = ["cdylib"]
-name = "oxiloader"
+name = "minimal_asi_loader"
 
 # Exactly one of these must be selected at build time. It picks both the set of
 # exported functions and the System32 DLL those exports forward to.

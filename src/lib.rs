@@ -1,4 +1,4 @@
-//! oxiloader — a minimal ASI proxy loader.
+//! minimal-asi-loader — an ASI proxy loader.
 //!
 //! Built once per proxy name (see the cargo features). At load it forwards its
 //! exports to the real System32 DLL, then loads every `*.asi` next to it — that
@@ -153,7 +153,7 @@ fn load_asi_from(dir: &std::path::Path, seen: &mut std::collections::HashSet<std
             .chain(std::iter::once(0))
             .collect();
         unsafe {
-            // `seen` only covers this sweep. A second oxiloader in the same
+            // `seen` only covers this sweep. A second instance in the same
             // process — two proxy names dropped in one game folder — runs its own
             // sweep with its own `seen`, and `LoadLibraryW` would hand back the
             // module the first one already loaded, re-running its `InitializeASI`.

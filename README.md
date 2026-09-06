@@ -1,6 +1,6 @@
-# Oxide ASI Loader
+# Minimal ASI Loader
 
-**`oxiloader`**: a minimal ASI proxy loader, in Rust.
+**`minimal-asi-loader`**: an ASI proxy loader, in Rust.
 
 It impersonates one Windows system DLL, forwards every export to the genuine copy
 in `System32`, and loads every `*.asi` plugin next to it. That is the entire
@@ -49,7 +49,7 @@ DLL itself.
 - **Deduplicated plugins.** A plugin present in both the loader's own folder and
   `plugins\` is loaded once (the copy next to the loader wins), matched by file
   name case-insensitively. Anything already mapped into the process is skipped
-  outright, so dropping two oxiloader proxies in one folder doesn't run a
+  outright, so dropping two of these proxies in one folder doesn't run a
   plugin's `InitializeASI` twice.
 - **Plugin ABI:** the standard ASI convention. Each `.asi` may export
   `InitializeASI()`, which is called after it loads, so existing ASI plugins work
@@ -69,7 +69,7 @@ functions).
 .\build-all.ps1
 
 # or one at a time
-cargo build --release --features version   # -> target\release\oxiloader.dll
+cargo build --release --features version   # -> target\release\minimal_asi_loader.dll
 ```
 
 Exactly one proxy feature must be selected: `version`, `dsound`, `dxgi`, `winmm`,
